@@ -40,8 +40,22 @@ const BANNER_CSS = `
 
 function log(...args) { if (DEBUG) console.log('[upgrade-banner]', ...args); }
 
-function idOf(external) { return external && external.ecommerce ? String(external.ecommerce) : null; }
-function productId(sub) { return idOf(sub.external_product_id); }
+function extId(field) {
+  if (field == null) return null;
+  if (typeof field === 'object') return field.ecommerce != null ? String(field.ecommerce) : null;
+  return String(field);
+}
+// Read product id under every field name the SDK might use across versions.
+function productId(sub) {
+  return extId(sub.external_product_id)
+      || (sub.shopify_product_id != null ? String(sub.shopify_product_id) : null)
+      || (sub.product_id != null ? String(sub.product_id) : null);
+}
+function variantIdOf(sub) {
+  return extId(sub.external_variant_id)
+      || (sub.shopify_variant_id != null ? String(sub.shopify_variant_id) : null)
+      || (sub.variant_id != null ? String(sub.variant_id) : null);
+}
 function isMonthly(sub) {
   return sub.order_interval_unit === 'month' && Number(sub.order_interval_frequency) === 1;
 }
@@ -101,10 +115,12 @@ class MonsterbassUpgradeBanner extends HTMLElement {
       });
       const subs = res.subscriptions || [];
 
-      log('active subs:', subs.map(s => ({
-        id: s.id, product: productId(s), variant: idOf(s.external_variant_id),
+      log('active sub count:', subs.length);
+      log('active subs (parsed):', subs.map(s => ({
+        id: s.id, product: productId(s), variant: variantIdOf(s),
         unit: s.order_interval_unit, freq: s.order_interval_frequency,
       })));
+      if (subs[0]) log('RAW first subscription object (field names):', subs[0]);
 
       const gold = subs.find(s => productId(s) === CONFIG.GOLD_PRODUCT_ID);
       const monthlyPlatinum = subs.find(s => productId(s) === CONFIG.PLATINUM_PRODUCT_ID && isMonthly(s));
