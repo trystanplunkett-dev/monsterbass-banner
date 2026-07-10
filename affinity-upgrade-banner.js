@@ -1,42 +1,36 @@
 /* =============================================================================
- * Affinity 2.0 (Home Page Builder) - Conditional Sidebar Upgrade Banner
+ * Affinity 2.0 Custom Extension - Conditional Sidebar Upgrade Banner
  * MONSTERBASS (store 73246)
- * -----------------------------------------------------------------------------
- * Rule 1: Subscribers on the Gold monthly product  -> prompt upgrade to Platinum
- * Rule 2: Subscribers on Platinum billed MONTHLY    -> prompt switch to QUARTERLY
+ * Registers a custom element <monsterbass-upgrade-banner> that Recharge mounts
+ * wherever the extension block is placed (right sidebar).
  *
- * Ships as the JS bundle for a Custom Extension block placed in the right rail
- * (sidebar) of the Affinity Home Page Builder. Uses the Recharge Storefront
- * JS SDK (@rechargeapps/storefront-client), already loaded inside the portal.
- *
- * Matching keys off Shopify VARIANT IDs + billing cadence (reliable) rather than
- * SKU strings. Actions use plan_id since Gold and Platinum are separate products.
+ * Rule 1: Gold monthly subscribers   -> upgrade to Platinum
+ * Rule 2: Platinum MONTHLY subscribers -> switch to quarterly
  * ========================================================================== */
 
 (function () {
   "use strict";
 
+  var TAG = "monsterbass-upgrade-banner";
+  if (customElements.get(TAG)) return; // already registered
+
+  var DEBUG = true; // set false once confirmed working. Logs to browser console.
+
   var CONFIG = {
-    // ---- Source (current) subscription identifiers, used for MATCHING ----
     GOLD_VARIANT_ID: "46071549821093",       // Gold (monthly) Shopify variant
     PLATINUM_VARIANT_ID: "46007609393317",   // Platinum monthly Shopify variant
-
-    // ---- Target identifiers, used for the UPGRADE actions ----
     PLATINUM_MONTHLY_PLAN_ID: 20031521,      // Gold -> Platinum lands here
     PLATINUM_QUARTERLY_PLAN_ID: 20031523,    // Platinum monthly -> quarterly
-
-    // SKUs kept for reference only (not used for matching):
-    // GOLD_SKU = "gold-paid-monthly-1", PLATINUM_SKU = "platinum-paid-monthly"
   };
 
-  /* --------------------------- SDK ACCESS --------------------------------- */
-  function getSDK() {
-    return window.recharge || window.RechargeStorefront || null;
+  function log() {
+    if (DEBUG) console.log.apply(console, ["[upgrade-banner]"].concat([].slice.call(arguments)));
   }
 
+  /* --------------------------- SDK ACCESS --------------------------------- */
+  function getSDK() { return window.recharge || window.RechargeStorefront || null; }
+
   async function getSession(sdk) {
-    // Inside Affinity the customer is already authenticated. If your Page Builder
-    // extension context hands you a session, use that here instead.
     if (sdk.session) return sdk.session;
     return await sdk.auth.loginCustomerPortal();
   }
@@ -44,20 +38,15 @@
   async function getActiveSubscriptions(sdk, session) {
     var customer = await sdk.customer.getCustomer(session);
     var res = await sdk.subscription.listSubscriptions(session, {
-      customer_id: customer.id,
-      status: "active",
-      limit: 250,
+      customer_id: customer.id, status: "active", limit: 250,
     });
     return res.subscriptions || [];
   }
 
-  /* --------------------------- MATCH LOGIC ---------------------------------
-   * external_variant_id is an object: { ecommerce: "<shopify variant id>" }.
-   */
+  /* --------------------------- MATCH LOGIC -------------------------------- */
   function variantId(sub) {
     return sub.external_variant_id && sub.external_variant_id.ecommerce
-      ? String(sub.external_variant_id.ecommerce)
-      : null;
+      ? String(sub.external_variant_id.ecommerce) : null;
   }
   function isMonthly(sub) {
     return sub.order_interval_unit === "month" && Number(sub.order_interval_frequency) === 1;
@@ -66,15 +55,10 @@
     return subs.find(function (s) { return variantId(s) === CONFIG.GOLD_VARIANT_ID; });
   }
   function findMonthlyPlatinum(subs) {
-    return subs.find(function (s) {
-      return variantId(s) === CONFIG.PLATINUM_VARIANT_ID && isMonthly(s);
-    });
+    return subs.find(function (s) { return variantId(s) === CONFIG.PLATINUM_VARIANT_ID && isMonthly(s); });
   }
 
-  /* --------------------------- ACTIONS -------------------------------------
-   * Passing plan_id means the interval fields are handled by the plan, so we
-   * don't need to set order/charge_interval_* manually.
-   */
+  /* --------------------------- ACTIONS ------------------------------------ */
   async function upgradeToPlatinum(sdk, session, sub) {
     return sdk.subscription.updateSubscription(session, sub.id, {
       external_variant_id: { ecommerce: CONFIG.PLATINUM_VARIANT_ID },
@@ -82,27 +66,12 @@
     });
   }
   async function switchToQuarterly(sdk, session, sub) {
-    // Switching cadence recalculates the next charge date and clears
-    // skipped / manually-edited charges on this subscription.
     return sdk.subscription.updateSubscription(session, sub.id, {
       plan_id: CONFIG.PLATINUM_QUARTERLY_PLAN_ID,
     });
   }
 
-  /* --------------------------- UI ------------------------------------------
-   * Styled with the portal's own --recharge- CSS variables. ~400px sidebar.
-   */
-  function bannerMarkup(heading, subtext, ctaLabel) {
-    return (
-      '<div class="rc-upgrade-banner">' +
-        '<h4 class="rc-upgrade-banner__title">' + heading + "</h4>" +
-        '<p class="rc-upgrade-banner__text">' + subtext + "</p>" +
-        '<button type="button" class="rc-upgrade-banner__cta">' + ctaLabel + "</button>" +
-        '<p class="rc-upgrade-banner__status" hidden></p>' +
-      "</div>"
-    );
-  }
-
+  /* --------------------------- STYLES ------------------------------------- */
   function injectStyles() {
     if (document.getElementById("rc-upgrade-banner-styles")) return;
     var css =
@@ -120,90 +89,95 @@
     document.head.appendChild(el);
   }
 
-  /* --------------------------- RENDER -------------------------------------- */
-  async function render(container) {
-    var sdk = getSDK();
-    if (!sdk) return;
-    injectStyles();
+  function bannerMarkup(heading, subtext, ctaLabel) {
+    return (
+      '<div class="rc-upgrade-banner">' +
+        '<h4 class="rc-upgrade-banner__title">' + heading + "</h4>" +
+        '<p class="rc-upgrade-banner__text">' + subtext + "</p>" +
+        '<button type="button" class="rc-upgrade-banner__cta">' + ctaLabel + "</button>" +
+        '<p class="rc-upgrade-banner__status" hidden></p>' +
+      "</div>"
+    );
+  }
 
-    var session, subs;
-    try {
-      session = await getSession(sdk);
-      subs = await getActiveSubscriptions(sdk, session);
-    } catch (e) {
-      console.error("[upgrade-banner] could not load subscriptions", e);
-      return;
-    }
+  /* --------------------------- CUSTOM ELEMENT ----------------------------- */
+  class UpgradeBanner extends HTMLElement {
+    connectedCallback() { this.renderBanner(); }
 
-    var gold = findGold(subs);
-    var monthlyPlatinum = findMonthlyPlatinum(subs);
+    async renderBanner() {
+      var host = this;
+      var sdk = getSDK();
+      if (!sdk) {
+        // SDK may load slightly after the element mounts; retry briefly.
+        if ((this._tries = (this._tries || 0) + 1) < 40) {
+          return void setTimeout(function () { host.renderBanner(); }, 250);
+        }
+        log("SDK not found on window. Is this running inside the Affinity portal?");
+        return;
+      }
 
-    var heading, subtext, ctaLabel, handler, targetSub;
-    if (gold) {
-      heading = "Level up to Platinum";
-      subtext = "You're on Gold. Upgrade to Platinum for the full MONSTERBASS experience: more gear, more tackle, every month.";
-      ctaLabel = "Upgrade to Platinum";
-      targetSub = gold;
-      handler = upgradeToPlatinum;
-    } else if (monthlyPlatinum) {
-      heading = "Switch to quarterly & simplify";
-      subtext = "Love your Platinum box? Go quarterly for fewer, bigger deliveries and one less thing to think about.";
-      ctaLabel = "Switch to quarterly";
-      targetSub = monthlyPlatinum;
-      handler = switchToQuarterly;
-    } else {
-      container.innerHTML = "";
-      return;
-    }
+      injectStyles();
 
-    container.innerHTML = bannerMarkup(heading, subtext, ctaLabel);
-    var btn = container.querySelector(".rc-upgrade-banner__cta");
-    var status = container.querySelector(".rc-upgrade-banner__status");
-
-    btn.addEventListener("click", async function () {
-      btn.disabled = true;
-      status.hidden = false;
-      status.textContent = "Updating your subscription...";
-      status.style.color = "var(--recharge-color-neutral-80,#3c4245)";
+      var session, subs;
       try {
-        await handler(sdk, session, targetSub);
-        status.textContent = "Done! Your plan has been updated.";
-        status.style.color = "var(--recharge-color-positive,#00a854)";
-        setTimeout(function () { render(container); }, 1200);
+        session = await getSession(sdk);
+        subs = await getActiveSubscriptions(sdk, session);
       } catch (e) {
-        console.error("[upgrade-banner] update failed", e);
-        btn.disabled = false;
-        status.textContent = "Sorry, that didn't work. Please try again or contact support.";
-        status.style.color = "var(--recharge-color-caution120,#cc7a00)";
+        log("could not load subscriptions", e);
+        return;
       }
-    });
-  }
 
-  /* --------------------------- BOOTSTRAP ----------------------------------- */
-  function boot() {
-    var container =
-      (document.currentScript && document.currentScript.parentElement) ||
-      document.getElementById("rc-upgrade-banner-root");
-    if (!container) {
-      container = document.createElement("div");
-      container.id = "rc-upgrade-banner-root";
-      document.body.appendChild(container);
+      // Debug: show exactly what this customer has, so you can confirm matching.
+      log("active subs for this customer:", subs.map(function (s) {
+        return { id: s.id, variant: variantId(s), unit: s.order_interval_unit, freq: s.order_interval_frequency, sku: s.sku };
+      }));
+
+      var gold = findGold(subs);
+      var monthlyPlatinum = findMonthlyPlatinum(subs);
+
+      var heading, subtext, ctaLabel, handler, targetSub;
+      if (gold) {
+        heading = "Level up to Platinum";
+        subtext = "You're on Gold. Upgrade to Platinum for the full MONSTERBASS experience: more gear, more tackle, every month.";
+        ctaLabel = "Upgrade to Platinum";
+        targetSub = gold; handler = upgradeToPlatinum;
+        log("matched GOLD ->", gold.id);
+      } else if (monthlyPlatinum) {
+        heading = "Switch to quarterly & simplify";
+        subtext = "Love your Platinum box? Go quarterly for fewer, bigger deliveries and one less thing to think about.";
+        ctaLabel = "Switch to quarterly";
+        targetSub = monthlyPlatinum; handler = switchToQuarterly;
+        log("matched MONTHLY PLATINUM ->", monthlyPlatinum.id);
+      } else {
+        log("no match for this customer; banner hidden.");
+        host.innerHTML = "";
+        return;
+      }
+
+      host.innerHTML = bannerMarkup(heading, subtext, ctaLabel);
+      var btn = host.querySelector(".rc-upgrade-banner__cta");
+      var status = host.querySelector(".rc-upgrade-banner__status");
+
+      btn.addEventListener("click", async function () {
+        btn.disabled = true;
+        status.hidden = false;
+        status.textContent = "Updating your subscription...";
+        status.style.color = "var(--recharge-color-neutral-80,#3c4245)";
+        try {
+          await handler(sdk, session, targetSub);
+          status.textContent = "Done! Your plan has been updated.";
+          status.style.color = "var(--recharge-color-positive,#00a854)";
+          setTimeout(function () { host.renderBanner(); }, 1200);
+        } catch (e) {
+          log("update failed", e);
+          btn.disabled = false;
+          status.textContent = "Sorry, that didn't work. Please try again or contact support.";
+          status.style.color = "var(--recharge-color-caution120,#cc7a00)";
+        }
+      });
     }
-
-    var tries = 0;
-    var timer = setInterval(function () {
-      if (getSDK() || tries++ > 40) {
-        clearInterval(timer);
-        render(container);
-      }
-    }, 250);
-
-    document.addEventListener("Recharge::action::orderChanged", function () { render(container); });
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
-  } else {
-    boot();
-  }
+  customElements.define(TAG, UpgradeBanner);
+  log("custom element registered:", TAG);
 })();
