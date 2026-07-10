@@ -1,14 +1,12 @@
 /* =============================================================================
  * Affinity 2.0 Custom Extension - Conditional Sidebar Upgrade Banner
- * MONSTERBASS (store 73246)
+ * MONSTERBASS dev store (73246)
  *
- * Built to the Recharge affinity-framework contract:
- *  - loads the Recharge JS SDK from the CDN, calls recharge.init()
- *  - Web Component (no Shadow DOM), default-exported, with refresh()
- *  - subscription writes use { commit: true }
+ * Matches by PRODUCT id (each product has many variants, so variant-level
+ * matching misses subscribers on other variants of the same product).
  *
- * Rule 1: Gold monthly subscribers    -> upgrade to Platinum (monthly)
- * Rule 2: Platinum MONTHLY subscribers -> switch to quarterly
+ * Rule 1: Gold subscribers            -> upgrade to Platinum (monthly)
+ * Rule 2: Platinum MONTHLY subscribers -> switch to Platinum quarterly (PREPAID)
  * ========================================================================== */
 
 const SDK_URL = 'https://static.rechargecdn.com/assets/storefront/recharge-client-1.81.0.min.js';
@@ -16,10 +14,17 @@ const TAG = 'monsterbass-upgrade-banner';
 const DEBUG = true; // logs to browser console; set false once confirmed working
 
 const CONFIG = {
-  GOLD_VARIANT_ID: '46071549821093',       // Gold (monthly) Shopify variant
-  PLATINUM_VARIANT_ID: '46007609393317',   // Platinum monthly Shopify variant
-  PLATINUM_MONTHLY_PLAN_ID: 20031521,      // Gold -> Platinum lands here
-  PLATINUM_QUARTERLY_PLAN_ID: 20031523,    // Platinum monthly -> quarterly
+  // Match on product id (verified against the store's plans)
+  GOLD_PRODUCT_ID: '9267789758629',        // "Monthly Shipment" (Gold) product
+  PLATINUM_PRODUCT_ID: '9244371845285',    // Platinum product (monthly + quarterly live here)
+
+  // Gold -> Platinum monthly target
+  PLATINUM_MONTHLY_PLAN_ID: 20031521,
+  PLATINUM_MONTHLY_VARIANT_ID: '46007609393317',
+
+  // Platinum monthly -> Platinum quarterly target (NOTE: this plan is PREPAID)
+  PLATINUM_QUARTERLY_PLAN_ID: 20031523,
+  PLATINUM_QUARTERLY_VARIANT_ID: '45999698575525',
 };
 
 const BANNER_CSS = `
@@ -35,18 +40,17 @@ const BANNER_CSS = `
 
 function log(...args) { if (DEBUG) console.log('[upgrade-banner]', ...args); }
 
-function variantId(sub) {
-  return sub.external_variant_id && sub.external_variant_id.ecommerce
-    ? String(sub.external_variant_id.ecommerce) : null;
-}
+function idOf(external) { return external && external.ecommerce ? String(external.ecommerce) : null; }
+function productId(sub) { return idOf(sub.external_product_id); }
 function isMonthly(sub) {
   return sub.order_interval_unit === 'month' && Number(sub.order_interval_frequency) === 1;
 }
 
 class MonsterbassUpgradeBanner extends HTMLElement {
   #session = null;
-  #offer = null;   // { heading, subtext, ctaLabel, action, sub }
+  #offer = null;
   #busy = false;
+  #sdk = null;
 
   connectedCallback() {
     if (!document.querySelector('#rc-upg-css')) {
@@ -59,7 +63,6 @@ class MonsterbassUpgradeBanner extends HTMLElement {
     this._init();
   }
 
-  // Portal calls this when a configured listener event fires (e.g. order changed)
   refresh() {
     this.#offer = null;
     this.#busy = false;
@@ -89,21 +92,22 @@ class MonsterbassUpgradeBanner extends HTMLElement {
 
   async _init() {
     try {
-      const sdk = await this._loadSdk();
-      this.#session = await sdk.loginCustomerPortal();
+      this.#sdk = await this._loadSdk();
+      this.#session = await this.#sdk.loginCustomerPortal();
 
-      const customer = await sdk.getCustomer(this.#session);
-      const res = await sdk.listSubscriptions(this.#session, {
+      const customer = await this.#sdk.getCustomer(this.#session);
+      const res = await this.#sdk.listSubscriptions(this.#session, {
         customer_id: customer.id, status: 'active', limit: 250,
       });
       const subs = res.subscriptions || [];
 
       log('active subs:', subs.map(s => ({
-        id: s.id, variant: variantId(s), unit: s.order_interval_unit, freq: s.order_interval_frequency, sku: s.sku,
+        id: s.id, product: productId(s), variant: idOf(s.external_variant_id),
+        unit: s.order_interval_unit, freq: s.order_interval_frequency,
       })));
 
-      const gold = subs.find(s => variantId(s) === CONFIG.GOLD_VARIANT_ID);
-      const monthlyPlatinum = subs.find(s => variantId(s) === CONFIG.PLATINUM_VARIANT_ID && isMonthly(s));
+      const gold = subs.find(s => productId(s) === CONFIG.GOLD_PRODUCT_ID);
+      const monthlyPlatinum = subs.find(s => productId(s) === CONFIG.PLATINUM_PRODUCT_ID && isMonthly(s));
 
       if (gold) {
         this.#offer = {
@@ -112,18 +116,22 @@ class MonsterbassUpgradeBanner extends HTMLElement {
           ctaLabel: 'Upgrade to Platinum',
           sub: gold,
           action: (sdk, session, sub) => sdk.updateSubscription(session, sub.id, {
-            external_variant_id: { ecommerce: CONFIG.PLATINUM_VARIANT_ID },
+            external_variant_id: { ecommerce: CONFIG.PLATINUM_MONTHLY_VARIANT_ID },
             plan_id: CONFIG.PLATINUM_MONTHLY_PLAN_ID,
           }, { commit: true }),
         };
         log('matched GOLD ->', gold.id);
       } else if (monthlyPlatinum) {
         this.#offer = {
-          heading: 'Switch to quarterly & simplify',
-          subtext: 'Love your Platinum box? Go quarterly for fewer, bigger deliveries and one less thing to think about.',
+          heading: 'Switch to quarterly & save a step',
+          subtext: 'Prefer fewer, bigger deliveries? Move your Platinum plan to our 3-month prepaid option.',
           ctaLabel: 'Switch to quarterly',
           sub: monthlyPlatinum,
+          // NOTE: quarterly is a PREPAID plan. Test this conversion carefully; if
+          // updateSubscription rejects a monthly->prepaid switch, this action may
+          // need a different flow (e.g. cancel + create). See message from analyst.
           action: (sdk, session, sub) => sdk.updateSubscription(session, sub.id, {
+            external_variant_id: { ecommerce: CONFIG.PLATINUM_QUARTERLY_VARIANT_ID },
             plan_id: CONFIG.PLATINUM_QUARTERLY_PLAN_ID,
           }, { commit: true }),
         };
@@ -133,7 +141,6 @@ class MonsterbassUpgradeBanner extends HTMLElement {
         log('no match; banner hidden.');
       }
 
-      this._sdk = sdk;
       this._render();
     } catch (err) {
       log('init failed', err);
@@ -161,7 +168,7 @@ class MonsterbassUpgradeBanner extends HTMLElement {
     this._render();
     const status = this.querySelector('.rc-upg__status');
     try {
-      await this.#offer.action(this._sdk, this.#session, this.#offer.sub);
+      await this.#offer.action(this.#sdk, this.#session, this.#offer.sub);
       if (status) {
         status.textContent = 'Done! Your plan has been updated.';
         status.style.color = 'var(--recharge-color-positive,#00a854)';
